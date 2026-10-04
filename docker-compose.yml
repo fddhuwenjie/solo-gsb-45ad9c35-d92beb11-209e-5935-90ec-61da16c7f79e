@@ -1,0 +1,26 @@
+services:
+  microplate-api:
+    build: .
+    image: microplate-arrangement-api:latest
+    container_name: microplate-arrangement-api
+    ports:
+      - "8000:8000"
+    environment:
+      # 单 worker + 固定随机种子 + 确定性时间限,保证同输入同 seed 同布局
+      CP_NUM_WORKERS: "1"
+      CP_DETERMINISTIC_TIME_SECONDS: "4"
+      CP_WALL_TIME_SECONDS: "12"
+      # 批次证书 SQLite 库路径(挂载命名卷持久化)
+      CERT_DB_PATH: "/data/certificates.db"
+    volumes:
+      - microplate-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  microplate-data:

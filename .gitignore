@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+# Runtime certificate database (local runs outside Docker)
+certificates.db
+certificates.db-wal
+certificates.db-shm
