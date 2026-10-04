@@ -113,6 +113,22 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
     response_body   TEXT NOT NULL,
     created_at      TEXT NOT NULL
 );
+-- Retest sampling plans anchored to a certificate revision. Each row freezes
+-- one plan drawn from that revision's snapshot (revision + digest identify
+-- the evidence the plan sampled from) together with the request parameters;
+-- rows are append-only and commit in the same transaction as the
+-- idempotency record.
+CREATE TABLE IF NOT EXISTS retest_plans (
+    plan_id         TEXT PRIMARY KEY,
+    batch_id        TEXT NOT NULL,
+    certificate_id  TEXT NOT NULL,
+    revision        INTEGER NOT NULL,
+    digest          TEXT NOT NULL,
+    request_key     TEXT NOT NULL,
+    seed            INTEGER NOT NULL,
+    plan            TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
 """
 
 

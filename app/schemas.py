@@ -70,6 +70,12 @@ CERTIFICATE_REVISION_MISMATCH = "CERTIFICATE_REVISION_MISMATCH"
 REQUEST_KEY_CONFLICT = "REQUEST_KEY_CONFLICT"
 REVOCATION_VIEW_DIGEST_MISMATCH = "VIEW_DIGEST_MISMATCH"
 
+# Category reported in 422 responses of the certificate retest-plan endpoint
+# when a group's quota exceeds the eligible samples (in the frozen layout and
+# grouping, confirmed by the frozen scan, carrying a valid reading and not on
+# an excluded well) of the certificate's current revision snapshot.
+VIOLATION_RETEST_GROUP_QUOTA_EXCEEDED = "RETEST_GROUP_QUOTA_EXCEEDED"
+
 # Categories reported in 422 responses of the dilution-plan endpoint when no
 # pipetting plan can satisfy every target well; no partial plan is emitted.
 VIOLATION_DILUTION_TARGET_WELLS_DUPLICATED = "DILUTION_TARGET_WELLS_DUPLICATED"
@@ -538,4 +544,54 @@ class CertificateReverifyRequest(BaseModel):
         for well, value in v.items():
             if value is not None and not math.isfinite(value):
                 raise ValueError(f"reading at well '{well}' must be a finite number or null")
+        return v
+
+
+class CertificateRetestPlanRequest(BaseModel):
+    """Draw a deterministic retest sampling plan from a certified batch.
+
+    The plan is anchored to the certificate's *current* revision: the layout,
+    sample grouping, scan and readings are restored from that revision's
+    frozen snapshot, and only samples with a valid (non-null) reading whose
+    well is not listed in ``excluded_wells`` may be selected. Every group
+    quota in ``group_counts`` must be satisfied exactly; subject to that, the
+    number of covered rows plus covered columns is maximized, then the number
+    of orthogonally adjacent selected pairs (all selected samples belong to
+    the certificate's single batch) is minimized, and remaining ties are
+    broken deterministically under ``seed``.
+
+    ``expected_revision`` must equal the certificate's current revision (a
+    re-verification that advanced the revision makes older revisions
+    unusable, 409). ``request_key`` is the idempotency key: replaying the
+    same key with identical content returns the recorded response; the same
+    key with different content is rejected with 409.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_id: str = Field(min_length=1, description="批次标识")
+    request_key: str = Field(
+        min_length=1, description="幂等键:同键同内容重放已记录响应,同键不同内容返回 409"
+    )
+    expected_revision: int = Field(
+        ge=1, description="期望的证书当前 revision;重核验推进 revision 后,旧 revision 的请求返回 409"
+    )
+    group_counts: dict[str, int] = Field(
+        min_length=1,
+        description="每个实验组需抽取的数量(每组 ≥1,必须恰好满足);未列出的组不抽取",
+    )
+    excluded_wells: list[str] = Field(
+        default_factory=list,
+        description="需避开的孔位(如 'A1');其上的样本不可被抽取,大小写不敏感",
+    )
+    seed: int = Field(default=0, ge=0, description="随机种子(≥0),控制确定性决胜")
+
+    @field_validator("group_counts")
+    @classmethod
+    def _quotas_valid(cls, v: dict[str, int]) -> dict[str, int]:
+        for group, quota in v.items():
+            if not group.strip():
+                raise ValueError("group names in group_counts must be non-empty")
+            if quota < 1:
+                raise ValueError(f"quota for group '{group}' must be at least 1")
         return v

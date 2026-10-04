@@ -32,6 +32,7 @@ docker compose up --build
 - 双人协作解盲： `POST http://localhost:8000/api/v1/blinding/unblind`
 - 批次证书建立： `POST http://localhost:8000/api/v1/certificates`
 - 证书重核验： `POST http://localhost:8000/api/v1/certificates/reverify`
+- 复测抽样计划： `POST http://localhost:8000/api/v1/certificates/retest-plan`
 
 不使用 Docker 时（Python 3.11+):
 
@@ -747,6 +748,123 @@ curl -X POST http://localhost:8000/api/v1/certificates/reverify \
 - 数据库路径由 `CERT_DB_PATH` 配置（默认 `./certificates.db`;Docker Compose
   将其设为 `/data/certificates.db` 并挂载命名卷持久化）。
 
+## 复测抽样计划 `POST /api/v1/certificates/retest-plan`
+
+在 **ACTIVE 批次证书的当前 revision** 上生成复测抽样计划。提交 `batch_id`、
+`expected_revision`、每个实验组需抽取的数量 `group_counts`、需避开的孔位
+`excluded_wells` 与 `seed`；服务从该 revision 冻结快照的 **layout、样本分组、
+扫描与读数**中取样，**只允许选择在冻结 layout 与分组中、经冻结扫描确认、
+有有效读数（非缺失/非 null）且孔位未被排除的样本**。
+
+选取规则（字典序）:
+
+1. **组配额（硬约束）**：每组抽取数量必须**恰好**等于 `group_counts` 中的配额；
+   任一组的有效候选不足即无解。
+2. **覆盖最大化**：在满足组配额后，最大化被覆盖的**行数与列数之和**。
+3. **相邻最小化**：再最小化被抽样本之间正交相邻（上下左右）的孔位对数——
+   被抽样本全部属于该证书的同一批次，即同批次样本相邻对。
+4. **确定性决胜**：前两级最优解集合中，以 seed 控制的确定性搜索固定唯一
+   抽样结果——**相同输入与相同 seed 必然得到完全相同的计划**。
+
+**读取证书状态、冻结快照并保存计划及幂等记录在同一个 SQLite 事务中完成**;
+证书已吊销、`expected_revision` 过期、无足够样本或约束无解时**不保存任何计划**。
+`request_key` 为幂等键：同键同内容重放已记录响应，同键不同内容返回 409;
+重核验推进 revision 后，使用旧 revision 的请求返回 409。
+
+端口 `8000` 调用示例：
+
+```bash
+curl -X POST http://localhost:8000/api/v1/certificates/retest-plan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "batch_id": "B2026-0042",
+    "request_key": "rt-9f3a-0042",
+    "expected_revision": 1,
+    "group_counts": {"treated": 2, "control": 2},
+    "excluded_wells": ["D2"],
+    "seed": 42
+  }'
+```
+
+### 复测抽样请求字段
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `batch_id` | string | 批次标识；证书必须为 ACTIVE |
+| `request_key` | string | **幂等键**：同键同内容重放已记录响应，同键不同内容返回 409 |
+| `expected_revision` | int | 期望的证书当前 revision(≥1)；重核验推进 revision 后，旧 revision 的请求返回 409 |
+| `group_counts` | object | 实验组 → 需抽取数量（每组 ≥1，必须恰好满足）；未列出的组不抽取 |
+| `excluded_wells[]` | array | 需避开的孔位（如 `"D2"`，大小写不敏感）；其上的样本不可被抽取 |
+| `seed` | int | 随机种子（≥0)，控制确定性决胜 |
+
+### 计划生成（201)
+
+返回计划标识、样本/孔位、各组计数、覆盖指标与 revision/digest:
+
+```json
+{
+  "plan_id": "retest-5d1193e3684c84fd3ba854d6",
+  "batch_id": "B2026-0042",
+  "certificate_id": "cert-baec0d0e577ec0e1c096f2a2",
+  "status": "ACTIVE",
+  "revision": 1,
+  "digest": "90a01799a9349066...",
+  "seed": 42,
+  "group_counts": {"control": 2, "treated": 2},
+  "excluded_wells": ["D2"],
+  "selected": [
+    {"sample_id": "S2", "well": "A2", "group": "control"},
+    {"sample_id": "S3", "well": "B1", "group": "treated"},
+    {"sample_id": "S6", "well": "C2", "group": "control"},
+    {"sample_id": "S7", "well": "D1", "group": "treated"}
+  ],
+  "groups": [
+    {"group": "control", "requested": 2, "selected": 2, "eligible": 3},
+    {"group": "treated", "requested": 2, "selected": 2, "eligible": 4}
+  ],
+  "coverage": {
+    "covered_rows": 4, "covered_columns": 2, "covered_total": 6,
+    "rows": ["A", "B", "C", "D"], "columns": [1, 2]
+  },
+  "adjacency": {
+    "same_batch_adjacent_pairs_count": 0,
+    "same_batch_adjacent_pairs": []
+  },
+  "solver": {
+    "status": "OPTIMAL",
+    "stages": [
+      {"stage": "1_coverage", "objective_value": 6, "status": "OPTIMAL",
+       "proven_optimal": true},
+      {"stage": "2_adjacency", "objective_value": 0, "status": "OPTIMAL",
+       "proven_optimal": true},
+      {"stage": "3_tiebreak", "objective_value": null, "status": "OPTIMAL",
+       "proven_optimal": true}
+    ]
+  }
+}
+```
+
+- `plan_id`：计划标识（由批次与幂等键确定性导出）；计划连同其锚定的
+  `revision`/`digest`（证书当前 revision 快照的内容摘要）在事务中持久化，
+  可随时审计该计划取自哪一版证据。
+- `selected`：被抽样本（样本 id、孔位、实验组），按孔位行主序排列。
+- `groups`：各组配额、实际抽取数（恒等于配额）与有效候选数。
+- `coverage`：被覆盖的行数、列数、行列总数及具体行字母/列号。
+- `adjacency`：被抽样本的同批次正交相邻对数与具体孔位对（第二级目标）。
+- `solver.status`:`OPTIMAL` 表示两级目标均已证明最优。
+
+### 其余复测抽样结果
+
+| 状态码 | 情形 |
+| --- | --- |
+| 404 | 批次无证书（`error = "CERTIFICATE_NOT_FOUND"`) |
+| 409 | 证书已吊销（`error = "CERTIFICATE_REVOKED"`，附 `revoked_reason`);`expected_revision` 与当前 revision 不符（`error = "CERTIFICATE_REVISION_MISMATCH"`，附 `current_revision`);`request_key` 曾被不同内容使用（`error = "REQUEST_KEY_CONFLICT"`) |
+| 422 | 任一组配额超过有效候选数或组不存在（`RETEST_GROUP_QUOTA_EXCEEDED`，消息列出全部不满足的组）、避开孔位非法（`WELL_REFERENCE_INVALID`)、请求体结构不合法（`REQUEST_VALIDATION_ERROR`);**不保存计划** |
+
+与证书状态相关的拒绝（404 无证书、409 已吊销/revision 不符）**不占用**
+`request_key`，修正状态后可用同键重试；422 拒绝与 201 计划一样被记录在
+幂等键下，同键同内容重放原响应。
+
 ## 稀释梯度配制计划 `POST /api/v1/arrangements/dilution-plan`
 
 为**既有编排结果**（编排接口响应中的 `layout`，即 sample_id → well 映射）
@@ -1087,6 +1205,11 @@ curl -X POST http://localhost:8000/api/v1/blinding/unblind \
   证据快照并重算 `digest`，相同（新 scan/readings）必然得到相同的新
   `digest`;证书状态（`revision`/`REVOKED`）由 SQLite 事务保证单调推进——
   revision 只增不减，吊销不可逆。
+- 复测抽样计划与编排接口共用同一套三阶段字典序 CP-SAT 求解与确定性决胜
+  （单 worker、固定 `random_seed`、确定性时间预算、最优解回注为完整 hint
+  后取首个解）：相同（证书 revision 快照， 配额， 避开孔位， seed）必然得到
+  逐孔一致的抽样计划；计划与其锚定的 `revision`/`digest` 及幂等记录在同一
+  SQLite 事务中提交。
 
 ## 配置（环境变量）
 
@@ -1120,11 +1243,12 @@ app/
   spatial_qc.py 组中位数中心化 + 行列中位数剥离（median polish）与组内置换检验
   release.py   批次放行两级门控:扫描吻合核验（复用纠位规则）→ 空间质控放行门
   certificates.py 批次证书:放行结果冻结快照（SQLite 单事务）、按 revision 追加不可变证据快照的重核验（通过则重算 digest,失败则吊销）、request_key 幂等
+  retest.py    复测抽样计划:从证书当前 revision 冻结快照中按组配额取样（有效读数且未被排除）,三阶段字典序求解（覆盖最大 → 同批次相邻最小 → seed 决胜）,单事务持久化
   dilution.py  稀释梯度配制:共享库存核算 + 分辨率取整 + 容差校验,确定性逐步移液指令
   blinding.py  双人协作盲化/解盲:AES-256-GCM 认证加密映射包 + XOR 双份额
   metrics.py   指标独立重算与布局约束校验
   plates.py    板型预设与孔位命名解析
-tests/         pytest 测试（解析、求解、API、纠位、空间质控、批次放行、批次证书、稀释计划、盲化解盲）
+tests/         pytest 测试（解析、求解、API、纠位、空间质控、批次放行、批次证书、复测抽样、稀释计划、盲化解盲）
 Dockerfile     单容器构建
 docker-compose.yml  单命令启动（含证书数据库命名卷）
 ```
