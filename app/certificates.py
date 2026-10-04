@@ -113,6 +113,20 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
     response_body   TEXT NOT NULL,
     created_at      TEXT NOT NULL
 );
+-- Re-test sampling plans drawn from a certificate revision. Every row pins
+-- the certificate revision (and that revision's content digest) whose frozen
+-- layout/grouping/scan/readings the plan was drawn from; advancing the
+-- certificate to a newer revision never mutates stored plans.
+CREATE TABLE IF NOT EXISTS retest_plans (
+    plan_id         TEXT PRIMARY KEY,
+    batch_id        TEXT NOT NULL,
+    certificate_id  TEXT NOT NULL,
+    revision        INTEGER NOT NULL CHECK (revision >= 1),
+    digest          TEXT NOT NULL,
+    seed            INTEGER NOT NULL,
+    plan_body       TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
 """
 
 

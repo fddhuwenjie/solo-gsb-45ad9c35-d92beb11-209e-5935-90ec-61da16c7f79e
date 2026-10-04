@@ -81,6 +81,13 @@ VIOLATION_DILUTION_CONCENTRATION_UNACHIEVABLE = "DILUTION_CONCENTRATION_UNACHIEV
 VIOLATION_DILUTION_ROUNDING_NO_GRID_SOLUTION = "DILUTION_ROUNDING_NO_GRID_SOLUTION"
 VIOLATION_DILUTION_ROUNDING_TOLERANCE_EXCEEDED = "DILUTION_ROUNDING_TOLERANCE_EXCEEDED"
 
+# Categories reported in 422 responses of the re-test sampling plan endpoint
+# when no plan can be drawn from a certificate's current revision; no plan is
+# saved in any of those cases.
+VIOLATION_RETEST_GROUP_UNKNOWN = "RETEST_GROUP_UNKNOWN"
+VIOLATION_RETEST_INSUFFICIENT_SAMPLES = "RETEST_INSUFFICIENT_SAMPLES"
+VIOLATION_RETEST_NO_SOLUTION = "RETEST_NO_SOLUTION"
+
 
 class PlateSpec(BaseModel):
     """Plate geometry.
@@ -538,4 +545,47 @@ class CertificateReverifyRequest(BaseModel):
         for well, value in v.items():
             if value is not None and not math.isfinite(value):
                 raise ValueError(f"reading at well '{well}' must be a finite number or null")
+        return v
+
+
+class RetestPlanRequest(BaseModel):
+    """Re-test sampling plan drawn from a certificate's current revision.
+
+    The service samples from the layout, sample grouping, scan and readings
+    frozen in the revision snapshot named by ``expected_revision``: only
+    samples with a valid (non-null, finite) reading at a well that is neither
+    blocked nor listed in ``avoid_wells`` — and whose well still carries that
+    sample in the frozen scan — may be selected. Every group quota must be
+    met exactly. Among the quota-satisfying selections the plan first
+    maximises covered rows + columns, then minimises orthogonally adjacent
+    same-batch pairs; ``seed`` resolves every remaining tie deterministically.
+    The certificate state read, the revision-snapshot freeze and the plan +
+    idempotency record write all happen in one SQLite transaction.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_id: str = Field(min_length=1, description="批次标识")
+    request_key: str = Field(
+        min_length=1, description="幂等键:同键同内容重放已记录响应,同键不同内容返回 409"
+    )
+    expected_revision: int = Field(
+        ge=1, description="期望的当前 revision;与证书当前值不一致时返回 409,旧 revision 不可取用"
+    )
+    group_counts: dict[str, int] = Field(
+        min_length=1,
+        description="每个实验组需抽取的数量(必须恰好满足):实验组标识 → 数量(≥0)",
+    )
+    avoid_wells: list[str] = Field(
+        default_factory=list, description="需避开的孔位;这些孔中的样本不参与抽取"
+    )
+    seed: int = Field(default=0, ge=0, description="随机种子(≥0),用于确定性决胜")
+
+    @field_validator("group_counts")
+    @classmethod
+    def _group_counts_valid(cls, v: dict[str, int]) -> dict[str, int]:
+        if any(not (g or "").strip() for g in v):
+            raise ValueError("group labels must be non-empty strings")
+        if any(n < 0 for n in v.values()):
+            raise ValueError("every group count must be >= 0")
         return v

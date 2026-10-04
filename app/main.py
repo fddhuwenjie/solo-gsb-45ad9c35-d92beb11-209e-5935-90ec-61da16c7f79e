@@ -12,10 +12,11 @@ from .planner import InfeasibleArrangement, SolverTimeout, plan_layout
 from .plates import parse_well
 from .blinding import BlindInvalid, blind, unblind
 from .certificates import create_certificate, reverify_certificate
+from .retest import create_retest_plan
 from .dilution import DilutionPlanInvalid, dilution_plan
 from .reconciler import ReconcileInvalid, StagingConflict, reconcile
 from .release import ReleaseInvalid, batch_release, release_invalid_body
-from .schemas import ArrangeRequest, BatchReleaseRequest, BlindRequest, CertificateCreateRequest, CertificateReverifyRequest, DilutionPlanRequest, ReconcileRequest, SpatialQCRequest, UnblindRequest
+from .schemas import ArrangeRequest, BatchReleaseRequest, BlindRequest, CertificateCreateRequest, CertificateReverifyRequest, DilutionPlanRequest, ReconcileRequest, RetestPlanRequest, SpatialQCRequest, UnblindRequest
 from .spatial_qc import SpatialQCInvalid, spatial_qc
 
 app = FastAPI(
@@ -365,4 +366,20 @@ async def create_batch_certificate(req: CertificateCreateRequest) -> JSONRespons
 )
 async def reverify_batch_certificate(req: CertificateReverifyRequest) -> JSONResponse:
     status, body = reverify_certificate(req)
+    return JSONResponse(status_code=status, content=body)
+
+
+@app.post(
+    "/api/v1/certificates/retest-plans",
+    summary="在 ACTIVE 批次证书的当前 revision 上生成确定性复测抽样计划",
+    responses={
+        201: {"description": "已从当前 revision 冻结快照抽取计划,同一 SQLite 事务中保存计划与幂等记录;返回计划标识、样本/孔位、各组计数、覆盖指标与 revision/digest"},
+        404: {"description": "批次无证书"},
+        409: {"description": "证书已吊销或 expected_revision 与当前 revision 不符,或 request_key 曾被不同内容使用;不保存计划"},
+        422: {"description": "请求组未知、有有效读数且未排除的样本不足或约束无解;不保存计划"},
+        503: {"description": "求解超时,不保存计划"},
+    },
+)
+async def create_batch_retest_plan(req: RetestPlanRequest) -> JSONResponse:
+    status, body = create_retest_plan(req)
     return JSONResponse(status_code=status, content=body)
